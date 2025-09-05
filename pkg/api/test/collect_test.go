@@ -23,12 +23,15 @@ import (
 
 	"github.com/pdfcpu/pdfcpu/pkg/api"
 	"github.com/pdfcpu/pdfcpu/pkg/pdfcpu"
+	"github.com/pdfcpu/pdfcpu/pkg/pdfcpu/model"
 )
 
 func TestCollect(t *testing.T) {
 	msg := "TestCollect"
-	pdfcpu.FastCover = true
 	// pdfcpu.FastCover = false
+
+	conf = model.NewDefaultConfiguration()
+	conf.FastCover = true
 
 	num := int32(0)
 	pdfcpu.TestNum = &num
@@ -36,7 +39,7 @@ func TestCollect(t *testing.T) {
 	outDir = "."
 
 	inFile := filepath.Join(inDir, "pike-stanford.pdf")
-	// inFile = filepath.Join(inDir, "Military.pdf")
+	inFile = filepath.Join(inDir, "Military.pdf")
 	// inFile = filepath.Join(inDir, "english.pdf")
 
 	outFile := filepath.Join(outDir, "collect_sample.pdf")
@@ -44,11 +47,11 @@ func TestCollect(t *testing.T) {
 
 	// Start with all odd pages but page 1, then append pages 8-11 and the last page.
 	// if err := api.CollectFile(inFile, outFile, []string{"odd", "!1", "8-11", "l"}, nil); err != nil {
-	if err := api.CollectFile(inFile, outFile, []string{"1"}, nil); err != nil {
+	if err := api.CollectFile(inFile, outFile, []string{"1"}, conf); err != nil {
 		t.Fatalf("%s: %v\n", msg, err)
 	}
 
-	if err := api.ValidateFile(outFile, nil); err != nil {
+	if err := api.ValidateFile(outFile, conf); err != nil {
 		t.Fatalf("%s: %v\n", msg, err)
 	}
 }

@@ -110,8 +110,8 @@ func ReadWithContext(c context.Context, rs io.ReadSeeker, conf *model.Configurat
 		return nil, errors.Wrap(err, "Read: xRefTable failed")
 	}
 
-	if FastCover {
-		coverTable(c, ctx)
+	if conf.FastCover {
+		shrinkTable(c, ctx)
 	}
 
 	// Make all objects explicitly available (load into memory) in corresponding xRefTable entries.
@@ -190,7 +190,7 @@ func offsetLastXRefSection(ctx *model.Context, skip int64) (*int64, error) {
 	}
 
 	for i := 1; offset == 0; i++ {
- 
+
 		off, err := rs.Seek(-int64(i)*bufSize-skip, io.SeekEnd)
 		if err != nil {
 			return nil, ErrMissingXRefSection
@@ -1236,7 +1236,7 @@ func parseXRefSection(c context.Context, ctx *model.Context, s *bufio.Scanner, f
 
 func scanForVersion(rs io.ReadSeeker, prefix string) ([]byte, int, error) {
 	bufSize := 100
- 
+
 	if _, err := rs.Seek(0, io.SeekStart); err != nil {
 		return nil, 0, err
 	}
@@ -2923,9 +2923,9 @@ type refTable struct {
 }
 
 // FastCover enables fast cover generation by only loading necessary objects
-var FastCover bool = false
+// var FastCover bool = false
 
-func coverTable(c context.Context, ctx *model.Context) {
+func shrinkTable(c context.Context, ctx *model.Context) {
 	// return
 	log.Info.Printf("FastCover: coverTable started")
 	xRefTable := ctx.XRefTable
@@ -3167,38 +3167,12 @@ func coverTable(c context.Context, ctx *model.Context) {
 func dereferenceObjectsRaw(c context.Context, ctx *model.Context) error {
 	xRefTable := ctx.XRefTable
 
-	if FastCover {
-
-		var table []*refTable
-		for k, v := range xRefTable.Table {
-			table = append(table, &refTable{objNr: k, entry: v})
+	for objNr := range xRefTable.Table {
+		if err := c.Err(); err != nil {
+			return err
 		}
-		sort.Slice(table, func(i, j int) bool {
-			if table[i].entry.Offset == nil {
-				return true
-			}
-			if table[j].entry.Offset == nil {
-				return false
-			}
-			return *table[i].entry.Offset < *table[j].entry.Offset
-		})
-
-		for _, ref := range table {
-			if err := c.Err(); err != nil {
-				return err
-			}
-			if err := dereferenceObject(c, ctx, ref.objNr); err != nil {
-				return err
-			}
-		}
-	} else {
-		for objNr := range xRefTable.Table {
-			if err := c.Err(); err != nil {
-				return err
-			}
-			if err := dereferenceObject(c, ctx, objNr); err != nil {
-				return err
-			}
+		if err := dereferenceObject(c, ctx, objNr); err != nil {
+			return err
 		}
 	}
 

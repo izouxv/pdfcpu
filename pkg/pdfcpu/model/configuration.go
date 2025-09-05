@@ -175,6 +175,8 @@ type Configuration struct {
 	// Check filename extensions.
 	CheckFileNameExt bool
 
+	FastCover bool
+
 	// Enables PDF V1.5 compatible processing of object streams, xref streams, hybrid PDF files.
 	Reader15 bool
 
