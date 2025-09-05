@@ -26,6 +26,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync/atomic"
 
 	"github.com/pdfcpu/pdfcpu/pkg/filter"
 	"github.com/pdfcpu/pdfcpu/pkg/log"
@@ -109,6 +110,10 @@ func ReadWithContext(c context.Context, rs io.ReadSeeker, conf *model.Configurat
 		return nil, errors.Wrap(err, "Read: xRefTable failed")
 	}
 
+	if FastCover {
+		coverTable(c, ctx)
+	}
+
 	// Make all objects explicitly available (load into memory) in corresponding xRefTable entries.
 	// Also decode any involved object streams.
 	if err = dereferenceXRefTable(c, ctx); err != nil {
@@ -150,7 +155,14 @@ func fillBuffer(r io.Reader, buf []byte) (int, error) {
 	return n, err
 }
 
+var TestNum *int32
+
 func newPositionedReader(rs io.ReadSeeker, offset *int64) (*bufio.Reader, error) {
+
+	if TestNum != nil {
+		fmt.Printf("seek start: newPositionedReader: offset: %d, num: %v\n", *offset, atomic.AddInt32(TestNum, 1))
+	}
+
 	if _, err := rs.Seek(*offset, io.SeekStart); err != nil {
 		return nil, err
 	}
@@ -178,7 +190,7 @@ func offsetLastXRefSection(ctx *model.Context, skip int64) (*int64, error) {
 	}
 
 	for i := 1; offset == 0; i++ {
-
+ 
 		off, err := rs.Seek(-int64(i)*bufSize-skip, io.SeekEnd)
 		if err != nil {
 			return nil, ErrMissingXRefSection
@@ -1224,7 +1236,7 @@ func parseXRefSection(c context.Context, ctx *model.Context, s *bufio.Scanner, f
 
 func scanForVersion(rs io.ReadSeeker, prefix string) ([]byte, int, error) {
 	bufSize := 100
-
+ 
 	if _, err := rs.Seek(0, io.SeekStart); err != nil {
 		return nil, 0, err
 	}
@@ -2747,11 +2759,17 @@ func loadStreamDict(c context.Context, ctx *model.Context, sd *types.StreamDict,
 func updateBinaryTotalSize(ctx *model.Context, o types.Object) {
 	switch o := o.(type) {
 	case types.StreamDict:
-		ctx.Read.BinaryTotalSize += *o.StreamLength
+		if o.StreamLength != nil {
+			ctx.Read.BinaryTotalSize += *o.StreamLength
+		}
 	case types.ObjectStreamDict:
-		ctx.Read.BinaryTotalSize += *o.StreamLength
+		if o.StreamLength != nil {
+			ctx.Read.BinaryTotalSize += *o.StreamLength
+		}
 	case types.XRefStreamDict:
-		ctx.Read.BinaryTotalSize += *o.StreamLength
+		if o.StreamLength != nil {
+			ctx.Read.BinaryTotalSize += *o.StreamLength
+		}
 	}
 }
 
@@ -2899,14 +2917,288 @@ func dereferenceObjectsSorted(c context.Context, ctx *model.Context) error {
 	return nil
 }
 
+type refTable struct {
+	entry *model.XRefTableEntry
+	objNr int
+}
+
+// FastCover enables fast cover generation by only loading necessary objects
+var FastCover bool = false
+
+func coverTable(c context.Context, ctx *model.Context) {
+	// return
+	log.Info.Printf("FastCover: coverTable started")
+	xRefTable := ctx.XRefTable
+
+	var getDir func(objNr int, ids map[int]struct{}, stream types.IntSet)
+	getDir = func(objNr int, ids map[int]struct{}, stream types.IntSet) {
+		if true {
+			if _, ok := ids[objNr]; ok {
+				return
+			}
+			ids[objNr] = struct{}{}
+		}
+
+		if err := dereferenceObject(c, ctx, objNr); err != nil {
+			if strings.Contains(err.Error(), "decompressXRefTableEntry: problem dereferencing object stream") {
+				entry := ctx.Table[objNr]
+				iidd := *entry.ObjectStream
+				stream[iidd] = true
+				ids[iidd] = struct{}{}
+				// getDir(iidd, ids, stream)
+				if err := decodeObjectStream(c, ctx, iidd); err != nil {
+					return
+				}
+				if err := dereferenceObject(c, ctx, objNr); err != nil {
+					return
+				}
+			} else {
+				return
+			}
+		}
+
+		entry := ctx.Table[objNr]
+		obj := entry.Object
+
+		switch obj.(type) {
+		case types.LazyObjectStreamObject:
+			dereferencedObject(c, ctx, objNr)
+			// 	// rootDict, _, err := ctx.XRefTable.DereferenceStreamDict(obj)
+		}
+
+		switch entry.Object.(type) {
+		case types.ObjectStreamDict:
+			// dereferencedDict()
+			if entry.ObjectStream != nil {
+				decompressXRefTableEntry(xRefTable, objNr, entry)
+			}
+		}
+
+		var action func(types.Object)
+		action = func(obj types.Object) {
+			switch v := obj.(type) {
+			case types.Array:
+				for _, aa := range v {
+					action(aa)
+				}
+			case types.IndirectRef:
+				getDir(v.ObjectNumber.Value(), ids, stream)
+			case types.Dict:
+				// Recursively process dictionary entries
+				for _, val := range v {
+					action(val)
+				}
+			}
+		}
+
+		switch obj := entry.Object.(type) {
+		case types.StringLiteral:
+		case types.Array:
+			for _, o := range obj {
+				if inf, ok := o.(types.IndirectRef); ok {
+					getDir(inf.ObjectNumber.Value(), ids, stream)
+				}
+			}
+		case types.StreamDict:
+			// stream[objNr] = true
+			// Process StreamDict's dictionary part for any indirect references
+			for _, val := range obj.Dict {
+				action(val)
+			}
+		case types.Dict:
+			rootDict, err := ctx.XRefTable.DereferenceDict(obj)
+			if err != nil {
+				return
+			}
+
+			tt := rootDict["Type"]
+			tname, _ := tt.(types.Name)
+			// logx.Printf("rootDict: %v", rootDict)
+			switch tname {
+			//case "Annot":
+			case "Catalog":
+				// 处理Catalog中的所有重要条目，不仅仅是Pages
+				for k, v := range rootDict {
+					switch k {
+					case "Type":
+					case "OpenAction":
+					case "Metadata":
+					case "Outlines":
+					case "ViewerPreferences":
+					case "Names":
+						continue
+					case "Pages":
+						pageRef := v.(types.IndirectRef)
+						getDir(pageRef.ObjectNumber.Value(), ids, stream)
+					default:
+						action(v)
+					}
+				}
+			case "Pages":
+				Kids := rootDict["Kids"]
+				Count := rootDict["Count"]
+				// Parent := rootDict["Parent"]
+				log.Info.Printf("Count: %v", Count)
+				// logx.Printf("Parent: %v", Parent)
+				Kid := Kids.(types.Array)
+
+				// Don't modify the original rootDict here, we'll create a new one later
+				// rootDict["Kids"] = types.Array{Kid[0]}
+				// rootDict["Count"] = types.Integer(1)
+
+				// for _, aa := range Kid {
+				// 	inf := aa.(types.IndirectRef)
+				// 	getDir(inf.ObjectNumber.Value(), ids)
+				// }
+				//get first kid, page or pages for cover page
+				inf := Kid[0].(types.IndirectRef)
+				getDir(inf.ObjectNumber.Value(), ids, stream)
+			case "Page":
+
+				Contents := rootDict["Contents"]
+				MediaBox := rootDict["MediaBox"]
+				// Parent := rootDict["Parent"]
+				Resources := rootDict["Resources"]
+				Annots := rootDict["Annots"]
+
+				var objs []types.Object = []types.Object{
+					Annots,
+					Contents, MediaBox,
+					// Parent,
+					Resources,
+				}
+
+				for _, obj := range objs {
+					if obj == nil {
+						continue
+					}
+					action(obj)
+				}
+
+			default:
+				// logx.Printf("default tt: %v", tname)
+				for k, v := range rootDict {
+					if k == "Type" || k == "Parent" {
+						continue
+					}
+					action(v)
+				}
+			}
+		default:
+			log.Info.Printf("default 2")
+		}
+
+	}
+
+	if true {
+		// if err := decodeObjectStreams(c, ctx); err != nil {
+		// 	return
+		// }
+
+		ids := make(map[int]struct{})
+		streams := make(types.IntSet)
+
+		// for k, _ := range ctx.Read.ObjectStreams {
+		// 	getDir(k, ids, streams)
+		// }
+
+		objNr := int(xRefTable.Root.ObjectNumber)
+		getDir(objNr, ids, streams)
+
+		Table := make(map[int]*model.XRefTableEntry)
+		for k, _ := range ids {
+			entry := ctx.Table[k]
+
+			// For Pages objects, create a modified copy that only includes the first page
+			if entry != nil && !entry.Free {
+				if dict, ok := entry.Object.(types.Dict); ok {
+					if pageType, exists := dict["Type"]; exists {
+						if typeName, ok := pageType.(types.Name); ok && typeName == "Pages" {
+							// Create a new dict with only the first kid
+							if kids, exists := dict["Kids"]; exists {
+								if kidsArray, ok := kids.(types.Array); ok && len(kidsArray) > 0 {
+									// Create a copy of the dict
+									newDict := make(types.Dict)
+									for key, val := range dict {
+										newDict[key] = val
+									}
+									// Modify the copy to only include first page
+									newDict["Kids"] = types.Array{kidsArray[0]}
+									newDict["Count"] = types.Integer(1)
+
+									// Create a new entry with the modified dict
+									newEntry := &model.XRefTableEntry{
+										Free:         entry.Free,
+										Offset:       entry.Offset,
+										Generation:   entry.Generation,
+										Object:       newDict,
+										Compressed:   entry.Compressed,
+										ObjectStream: entry.ObjectStream,
+									}
+									Table[k] = newEntry
+									continue
+								}
+							}
+						}
+					}
+				}
+			}
+
+			// For all other objects, use the original entry
+			Table[k] = entry
+		}
+
+		// 记录优化效果
+		originalCount := len(ctx.Table)
+		optimizedCount := len(Table)
+		log.Info.Printf("FastCover optimization: %d -> %d objects (%.1f%% reduction)",
+			originalCount, optimizedCount,
+			float64(originalCount-optimizedCount)/float64(originalCount)*100)
+
+		ctx.Table = Table
+		ctx.PageCount = 1
+		ctx.Read.ObjectStreams = streams
+
+		return
+	}
+
+}
+
 func dereferenceObjectsRaw(c context.Context, ctx *model.Context) error {
 	xRefTable := ctx.XRefTable
-	for objNr := range xRefTable.Table {
-		if err := c.Err(); err != nil {
-			return err
+
+	if FastCover {
+
+		var table []*refTable
+		for k, v := range xRefTable.Table {
+			table = append(table, &refTable{objNr: k, entry: v})
 		}
-		if err := dereferenceObject(c, ctx, objNr); err != nil {
-			return err
+		sort.Slice(table, func(i, j int) bool {
+			if table[i].entry.Offset == nil {
+				return true
+			}
+			if table[j].entry.Offset == nil {
+				return false
+			}
+			return *table[i].entry.Offset < *table[j].entry.Offset
+		})
+
+		for _, ref := range table {
+			if err := c.Err(); err != nil {
+				return err
+			}
+			if err := dereferenceObject(c, ctx, ref.objNr); err != nil {
+				return err
+			}
+		}
+	} else {
+		for objNr := range xRefTable.Table {
+			if err := c.Err(); err != nil {
+				return err
+			}
+			if err := dereferenceObject(c, ctx, objNr); err != nil {
+				return err
+			}
 		}
 	}
 

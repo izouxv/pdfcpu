@@ -17,6 +17,7 @@ limitations under the License.
 package test
 
 import (
+	"os"
 	"path/filepath"
 	"testing"
 
@@ -26,12 +27,24 @@ import (
 
 func TestCollect(t *testing.T) {
 	msg := "TestCollect"
+	pdfcpu.FastCover = true
+	// pdfcpu.FastCover = false
+
+	num := int32(0)
+	pdfcpu.TestNum = &num
+
+	outDir = "."
 
 	inFile := filepath.Join(inDir, "pike-stanford.pdf")
-	outFile := filepath.Join(outDir, "myPageSequence.pdf")
+	// inFile = filepath.Join(inDir, "Military.pdf")
+	// inFile = filepath.Join(inDir, "english.pdf")
+
+	outFile := filepath.Join(outDir, "collect_sample.pdf")
+	os.Remove(outFile)
 
 	// Start with all odd pages but page 1, then append pages 8-11 and the last page.
-	if err := api.CollectFile(inFile, outFile, []string{"odd", "!1", "8-11", "l"}, nil); err != nil {
+	// if err := api.CollectFile(inFile, outFile, []string{"odd", "!1", "8-11", "l"}, nil); err != nil {
+	if err := api.CollectFile(inFile, outFile, []string{"1"}, nil); err != nil {
 		t.Fatalf("%s: %v\n", msg, err)
 	}
 
